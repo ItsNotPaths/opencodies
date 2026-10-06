@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
 
     // tests/<name>.zig imports src/<name>.zig as <name>, the made-up cars and surfaces as "data"
     const data = b.createModule(.{ .root_source_file = b.path("data/data.zig") });
-    for ([_][]const u8{ "d3", "fh", "dr1", "material" }) |name| {
+    for ([_][]const u8{ "d3", "fh", "dr1", "material", "fork" }) |name| {
         const root = b.createModule(.{ .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})), .target = target, .optimize = optimize });
         generic(b, root);
         const tests = b.addTest(.{ .root_module = b.createModule(.{

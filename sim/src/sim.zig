@@ -25,6 +25,7 @@ comptime {
     _ = @import("d3/exports.zig"); // the D3 model function by function, for the diff tools
     _ = @import("dr1/exports.zig"); // the same for DR1
     _ = @import("fh/exports.zig"); // single FH functions, for the recompiled-game checks
+    _ = @import("fork/exports.zig"); // parts with no game behind them (car against car)
 }
 
 // sim_create's car: made up, no game's data (sim/data/cars/hatch.zon)
