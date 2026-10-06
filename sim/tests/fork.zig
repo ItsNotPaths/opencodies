@@ -329,3 +329,17 @@ test "hits index the list given to sim_collide_cars" {
     const h = hitsOver(&.{ &a, &bare, &b });
     try expect(h.counts[0] == 1 and h.each[0][0].a == 0 and h.each[0][0].b == 2);
 }
+
+test "contacts whose normals cancel leave both cars finite" {
+    var sa = at(.{ 0, 0, 0 }, ahead);
+    var sb = at(.{ 1.5, 0, 0 }, ahead);
+    sa.vel = .{ 1, 0, 0 };
+    const list = [_]cars.Car{ car(&sa), car(&sb) };
+    const pairs = [_]cars.Pair{
+        .{ .a = 0, .b = 1, .contact = .{ .point = .{ 0.75, 0, 0.5 }, .normal = .{ -1, 0, 0 }, .depth = 0.02 } },
+        .{ .a = 0, .b = 1, .contact = .{ .point = .{ 0.75, 0, -0.5 }, .normal = .{ 1, 0, 0 }, .depth = 0.02 } },
+    };
+    var hits: [cars.max_hits]cars.Hit = undefined;
+    _ = cars.solve(&list, &pairs, dt, &hits);
+    for ([_]body.State{ sa, sb }) |s| for ([_]V3{ s.pos, s.vel, s.angvel }) |v| try expect(std.math.isFinite(@reduce(.Add, v)));
+}

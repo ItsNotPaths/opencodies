@@ -293,7 +293,8 @@ const Patch = struct {
         }
         const count = splat(@floatFromInt(own.len));
         point /= count;
-        normal = vec.normalize(normal / count);
+        // normals that cancel: the first contact's, a real way out between the two (chassis.zig falls back to up)
+        normal = if (vec.length(normal) > 1e-4) vec.normalize(normal / count) else own[0].contact.normal;
         const axis: V3 = if (@abs(normal[1]) <= 0.707) .{ 0, 1, 0 } else .{ 1, 0, 0 };
         const slide = vec.normalize(cross(axis, normal));
         const p = own[0];
