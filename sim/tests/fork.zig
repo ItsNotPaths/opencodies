@@ -102,7 +102,8 @@ fn run(a: body.State, b: body.State, steps: usize) Run {
         const pairs = cars.collide(&list, &out, dt);
         if (pairs.len > 0 and r.first == null) r.first = i;
         if (pairs.len == 0 and r.first != null and r.apart == null) r.apart = i;
-        cars.solve(&list, pairs, dt);
+        var hits: [cars.max_hits]cars.Hit = undefined;
+        _ = cars.solve(&list, pairs, dt, &hits);
     }
     return r;
 }
@@ -271,4 +272,60 @@ fn bits(p: cars.Pair) [10]u32 {
     const u: @Vector(3, u32) = @bitCast(c.point);
     const v: @Vector(3, u32) = @bitCast(c.normal);
     return .{ p.a, p.b, c.piece, u[0], u[1], u[2], v[0], v[1], v[2], @bitCast(c.depth) };
+}
+
+const Hits = struct { each: [hit_steps][cars.max_hits]cars.Hit = undefined, counts: [hit_steps]u32 = undefined };
+const hit_steps = 25;
+
+// the hits of each sim_collide_cars, all cars coasting in neutral
+fn hitsOver(sims: []const *sim.Sim) Hits {
+    var h: Hits = .{};
+    for (&h.each, &h.counts) |*out, *n| {
+        for (sims) |s| sim.sim_step(s, &.{}, dt);
+        fork.exports.sim_collide_cars(sims.ptr, @intCast(sims.len), dt);
+        n.* = fork.exports.sim_hits(out, cars.max_hits);
+    }
+    return h;
+}
+
+test "head on at 36 km/h each: one hit per step, a large impulse in the contact step" {
+    var a = launch(0, 0, ahead, 36);
+    var b = launch(0, 12, back, 36);
+    const h = hitsOver(&.{ &a, &b });
+    var peak: cars.Hit = .{ .a = 0, .b = 0, .impulse = 0, .speed = 0 };
+    for (h.each, h.counts) |out, n| {
+        try expect(n <= 1);
+        if (n == 1) {
+            try expect(out[0].a == 0 and out[0].b == 1 and out[0].impulse > 0);
+            if (out[0].impulse > peak.impulse) peak = out[0];
+        }
+    }
+    try expect(peak.impulse > 5 * hatch.mass); // half of what stops both: reduced mass m/2 times 20 m/s
+    try expect(peak.speed > 15);
+}
+
+test "cars apart: no hits" {
+    var a = launch(0, 0, ahead, 0);
+    var b = launch(0, 10, back, 0);
+    for (hitsOver(&.{ &a, &b }).counts) |n| try expect(n == 0);
+}
+
+test "a parked car touching another: a small impulse each step" {
+    var a = launch(0, 0, ahead, 0);
+    var b = launch(1.4 + range - 0.02, 0, ahead, 0);
+    const h = hitsOver(&.{ &a, &b });
+    for (h.each, h.counts) |out, n| {
+        try expect(n == 1);
+        try expect(out[0].impulse > 0 and out[0].impulse < 0.2 * hatch.mass);
+        try expect(out[0].speed < 0.5);
+    }
+}
+
+test "hits index the list given to sim_collide_cars" {
+    var a = launch(0, 0, ahead, 0);
+    var bare = launch(-10, 0, ahead, 0);
+    bare.car.hull = null; // takes no part
+    var b = launch(1.4 + range - 0.02, 0, ahead, 0);
+    const h = hitsOver(&.{ &a, &bare, &b });
+    try expect(h.counts[0] == 1 and h.each[0][0].a == 0 and h.each[0][0].b == 2);
 }

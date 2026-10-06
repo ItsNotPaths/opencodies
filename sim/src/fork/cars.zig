@@ -20,7 +20,12 @@ pub const Pair = struct { a: u16, b: u16, contact: chassis.Contact }; // a < b; 
 
 pub const max_cars = 8; // a lobby
 pub const per_pair = 8; // contacts a car pair keeps
-pub const max_pairs = max_cars * (max_cars - 1) / 2 * per_pair; // every pair fits
+pub const max_hits = max_cars * (max_cars - 1) / 2; // one per car pair
+pub const max_pairs = max_hits * per_pair; // every pair fits
+
+// a car pair that the solve pushed apart: impulse N s, the sum of its normal rows; speed m/s, closing along the mean
+// normal before the solve
+pub const Hit = extern struct { a: u32, b: u32, impulse: f32, speed: f32 };
 
 const max_corners = 1024; // all pieces of a hull
 const merge = 0.05; // m, a contact this close to a kept one of its pair merges into it, the deeper stays
@@ -192,9 +197,9 @@ fn span(points: []const V3, dir: V3) [2]f32 {
 }
 
 // as chassis.solve with each row on both cars: a soft normal row per contact, then one friction patch per car
-// pair, bound by the friction times the pair's normal sum. Then the position pass
-pub fn solve(cars: []const Car, pairs: []const Pair, dt: f32) void {
-    if (pairs.len == 0) return;
+// pair, bound by the friction times the pair's normal sum. Then the position pass. The hits go in out, in pair order
+pub fn solve(cars: []const Car, pairs: []const Pair, dt: f32, out: *[max_hits]Hit) []Hit {
+    if (pairs.len == 0) return out[0..0];
     var rows: [max_pairs]Row = undefined;
     var patches: [max_pairs]Patch = undefined;
     var n: usize = 0;
@@ -225,6 +230,16 @@ pub fn solve(cars: []const Car, pairs: []const Pair, dt: f32) void {
         for (&patch.rows) |*r| r.relax(cars, -friction * pressed, friction * pressed);
     };
     project(cars, pairs);
+    var count: usize = 0;
+    for (patches[0..n]) |patch| {
+        var impulse: f32 = 0;
+        for (rows[patch.from..patch.to]) |r| impulse += r.sum;
+        if (impulse <= 0) continue;
+        const p = pairs[patch.from];
+        out[count] = .{ .a = p.a, .b = p.b, .impulse = impulse, .speed = patch.speed };
+        count += 1;
+    }
+    return out[0..count];
 }
 
 // one row on two cars: dot(lin, v_a - v_b) + dot(ang_a, w_a) + dot(ang_b, w_b); impulses equal and opposite
@@ -266,6 +281,7 @@ const Patch = struct {
     from: usize,
     to: usize,
     rows: [3]Row = undefined,
+    speed: f32 = 0, // m/s, closing at the mean point along the mean normal
 
     fn place(patch: *Patch, pairs: []const Pair, cars: []const Car) void {
         const own = pairs[patch.from..patch.to];
@@ -283,6 +299,7 @@ const Patch = struct {
         const p = own[0];
         const a = cars[p.a].state.*;
         const b = cars[p.b].state.*;
+        patch.speed = dot(normal, body.pointVelocity(b, point) - body.pointVelocity(a, point));
         patch.rows = .{
             .{ .a = p.a, .b = p.b, .lin = splat(0), .ang_a = normal, .ang_b = -normal },
             .at(p, a, b, point, slide),
