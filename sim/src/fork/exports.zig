@@ -18,6 +18,6 @@ pub export fn sim_collide_cars(sims: [*]const *Sim, count: u32, dt: f32) void {
         n += 1;
     }
     var found: [cars.max_pairs]cars.Pair = undefined;
-    const pairs = cars.collide(list[0..n], &found);
+    const pairs = cars.collide(list[0..n], &found, dt);
     cars.solve(list[0..n], pairs, dt);
 }

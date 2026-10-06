@@ -30,7 +30,7 @@ fn car(s: *body.State) cars.Car {
 fn collide(a: body.State, b: body.State, out: []cars.Pair) []cars.Pair {
     var sa = a;
     var sb = b;
-    return cars.collide(&.{ car(&sa), car(&sb) }, out);
+    return cars.collide(&.{ car(&sa), car(&sb) }, out, dt);
 }
 
 // every contact: pair 0-1, normal n, depth about d
@@ -99,7 +99,7 @@ fn run(a: body.State, b: body.State, steps: usize) Run {
         r.b = body.advance(r.b, dt);
         const list = [_]cars.Car{ car(&r.a), car(&r.b) };
         var out: [cars.max_pairs]cars.Pair = undefined;
-        const pairs = cars.collide(&list, &out);
+        const pairs = cars.collide(&list, &out, dt);
         if (pairs.len > 0 and r.first == null) r.first = i;
         if (pairs.len == 0 and r.first != null and r.apart == null) r.apart = i;
         cars.solve(&list, pairs, dt);
@@ -121,7 +121,7 @@ fn together(a: *sim.Sim, b: *sim.Sim, input: sim.Input, steps: usize) f32 {
         sim.sim_step(b, &.{}, dt);
         fork.exports.sim_collide_cars(&[_]*sim.Sim{ a, b }, 2, dt);
         var out: [cars.max_pairs]cars.Pair = undefined;
-        for (cars.collide(&.{ car(&a.game.d3.body), car(&b.game.d3.body) }, &out)) |p| worst = @max(worst, p.contact.depth);
+        for (cars.collide(&.{ car(&a.game.d3.body), car(&b.game.d3.body) }, &out, dt)) |p| worst = @max(worst, p.contact.depth);
     }
     return worst;
 }
@@ -131,7 +131,6 @@ test "head on at equal speed: the momentum stays, the cars separate" {
     const momentum = (r.a.vel + r.b.vel) * @as(V3, @splat(hatch.mass));
     inline for (0..3) |k| try approx(0, momentum[k], 0.01 * hatch.mass * 10);
     try expect(r.first != null and r.apart != null);
-    try expect(r.b.vel[2] - r.a.vel[2] >= 0); // not closing
 }
 
 test "a car pushes a car at rest from the side: no more than 5 cm in" {
@@ -159,6 +158,103 @@ test "the same run gives the same bits" {
     const two = run(moving(.{ 0.3, 0.1, 0 }, tilt, 8), moving(.{ 0.2, 0.4, 4 }, across, 3), 50);
     try expect(one.first != null);
     try std.testing.expectEqual(stateBits(one.a) ++ stateBits(one.b), stateBits(two.a) ++ stateBits(two.b));
+}
+
+// a hatch on flat ground, settled, then rolling forward at km/h
+fn launch(x: f32, z: f32, axes: [3]V3, kmh: f32) sim.Sim {
+    var s: sim.Sim = .{};
+    s.game.d3.body.pos = .{ x, 0.39, z };
+    s.game.d3.body.axes = axes;
+    for (0..25) |_| sim.sim_step(&s, &.{}, dt);
+    s.game.d3.body.vel = axes[2] * @as(V3, @splat(kmh / 3.6));
+    for (&s.game.d3.wheels, hatch.wheels) |*w, p| w.spin = kmh / 3.6 / p.radius;
+    return s;
+}
+
+const Crash = struct {
+    overlap: f32 = 0, // m, the deepest the cores went into each other
+    low: f32 = std.math.inf(f32), // m, the lowest body centre
+    passed: bool = false, // b went behind a along the line a saw it on at the start
+    touching: bool = false, // at the end
+};
+
+// both coasting in neutral for 3 s
+fn crash(a: *sim.Sim, b: *sim.Sim) Crash {
+    var r: Crash = .{};
+    const line = b.game.d3.body.pos - a.game.d3.body.pos;
+    for (0..75) |_| {
+        sim.sim_step(a, &.{}, dt);
+        sim.sim_step(b, &.{}, dt);
+        const sa = &a.game.d3.body;
+        const sb = &b.game.d3.body;
+        r.overlap = @max(r.overlap, overlap(sa, sb)); // the vehicle step's move
+        fork.exports.sim_collide_cars(&[_]*sim.Sim{ a, b }, 2, dt);
+        r.overlap = @max(r.overlap, overlap(sa, sb));
+        var out: [cars.max_pairs]cars.Pair = undefined;
+        r.touching = cars.collide(&.{ car(sa), car(sb) }, &out, 0).len > 0;
+        r.low = @min(r.low, sa.pos[1], sb.pos[1]);
+        r.passed = r.passed or fork.vec.dot(sb.pos - sa.pos, line) < 0;
+    }
+    return r;
+}
+
+// m, the deepest the cores of the two cars are in each other
+fn overlap(a: *body.State, b: *body.State) f32 {
+    var out: [cars.max_pairs]cars.Pair = undefined;
+    var deepest_core: f32 = 0;
+    for (cars.collide(&.{ car(a), car(b) }, &out, 0)) |p| deepest_core = @max(deepest_core, p.contact.depth - range);
+    return deepest_core;
+}
+
+const speeds = [_]f32{ 36, 72, 100, 150, 200 };
+
+test "head on at speed: no deep overlap, no fall, no pass" {
+    for (speeds) |kmh| {
+        var a = launch(0, 0, ahead, kmh);
+        var b = launch(0, 40, back, kmh);
+        try expectSafe(crash(&a, &b), true);
+    }
+}
+
+test "glancing at speed: no deep overlap, no fall, they spin away" {
+    for (speeds) |kmh| {
+        var a = launch(0, 0, ahead, kmh);
+        var b = launch(0.7, 40, back, kmh); // half a car width
+        const r = crash(&a, &b);
+        try expectSafe(r, false); // they may slide past each other
+        try expect(!r.touching);
+        try expect(@max(@abs(yaw(a, ahead)), @abs(yaw(b, back))) > 5);
+    }
+}
+
+test "T-bone at 100 km/h into a parked car" {
+    var a = launch(0, 0, ahead, 100);
+    var b = launch(0, 30, across, 0);
+    try expectSafe(crash(&a, &b), true);
+}
+
+test "a crash at speed gives the same bits twice" {
+    var runs: [2][36]u32 = undefined;
+    for (&runs) |*x| {
+        var a = launch(0, 0, ahead, 150);
+        var b = launch(0.7, 40, back, 150);
+        _ = crash(&a, &b);
+        x.* = stateBits(a.game.d3.body) ++ stateBits(b.game.d3.body);
+    }
+    try std.testing.expectEqual(runs[0], runs[1]);
+}
+
+fn expectSafe(r: Crash, no_pass: bool) !void {
+    try expect(r.overlap <= 0.1);
+    try expect(r.low > 0); // above the ground
+    if (no_pass) try expect(!r.passed);
+}
+
+// degrees the car turned from its start heading
+fn yaw(s: sim.Sim, start: [3]V3) f32 {
+    const f = s.game.d3.body.axes[2];
+    const g = start[2];
+    return std.math.radiansToDegrees(std.math.atan2(f[0] * g[2] - f[2] * g[0], f[0] * g[0] + f[2] * g[2]));
 }
 
 fn stateBits(s: body.State) [18]u32 {

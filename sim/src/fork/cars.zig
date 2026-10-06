@@ -16,7 +16,7 @@ pub const friction = 0.2;
 
 pub const Car = struct { body: body.Body, hull: chassis.Hull, state: *body.State };
 
-pub const Pair = struct { a: u16, b: u16, contact: chassis.Contact }; // a < b; contact.normal: the way out for a
+pub const Pair = struct { a: u16, b: u16, contact: chassis.Contact }; // a < b; contact.normal: the way out for a; depth < 0: a gap
 
 pub const max_cars = 8; // a lobby
 pub const per_pair = 8; // contacts a car pair keeps
@@ -24,6 +24,7 @@ pub const max_pairs = max_cars * (max_cars - 1) / 2 * per_pair; // every pair fi
 
 const max_corners = 1024; // all pieces of a hull
 const merge = 0.05; // m, a contact this close to a kept one of its pair merges into it, the deeper stays
+const max_ahead = 5.0; // m, the farthest a pair looks for contacts past the margins: 2 x 225 km/h in one step
 
 // as chassis
 const cfm = 0.01;
@@ -34,10 +35,10 @@ const iterations = 5;
 const project_slop = 0.02; // m, depth that the position pass leaves
 const project_iterations = 3;
 
-// (hole car-pair-fast :tags fork :sev missing-system) no speculative contacts: a car moves 0.8 m per step at 72 km/h, past the 0.2 m range; head on at 2 x 72 km/h the hulls overlap 2.5 m, at 2 x 150 km/h they pass through and fall under the track
-// pairs a < b where the cores come closer than both margins: one contact per piece pair, a's pieces first,
-// merged by point; a full pair swaps its shallowest for a deeper one
-pub fn collide(cars: []const Car, out: []Pair) []Pair {
+// pairs a < b where the cores come closer than both margins plus the distance the pair can close in the next
+// step (speculative contacts): one contact per piece pair, a's pieces first, merged by point; a full pair swaps
+// its shallowest for a deeper one
+pub fn collide(cars: []const Car, out: []Pair, dt: f32) []Pair {
     var count: usize = 0;
     var world_a: [max_corners]V3 = undefined;
     var world_b: [max_corners]V3 = undefined;
@@ -46,7 +47,8 @@ pub fn collide(cars: []const Car, out: []Pair) []Pair {
         for (cars[i + 1 ..], i + 1..) |b, j| {
             const all_b = place(b, &world_b);
             const range = a.hull.margin + b.hull.margin;
-            if (!overlaps(bounds(all_a, range), bounds(all_b, 0))) continue;
+            const reach = range + @min(closing(a, all_a, b, all_b) * dt, max_ahead);
+            if (!overlaps(bounds(all_a, reach), bounds(all_b, 0))) continue;
             const axes = a.state.axes ++ b.state.axes;
             const first = count;
             var at_a: usize = 0;
@@ -57,8 +59,8 @@ pub fn collide(cars: []const Car, out: []Pair) []Pair {
                 for (b.hull.pieces) |pb| {
                     const corners_b = all_b[at_b..][0..pb.len];
                     at_b += pb.len;
-                    if (!overlaps(bounds(corners_a, range), bounds(corners_b, 0))) continue;
-                    var c = contact(corners_a, corners_b, all_a, all_b, axes, b.hull.margin, range) orelse continue;
+                    if (!overlaps(bounds(corners_a, reach), bounds(corners_b, 0))) continue;
+                    var c = contact(corners_a, corners_b, all_a, all_b, axes, b.hull.margin, range, reach) orelse continue;
                     c.piece = @intCast(index);
                     const pair: Pair = .{ .a = @intCast(i), .b = @intCast(j), .contact = c };
                     const kept = out[first..count];
@@ -91,6 +93,18 @@ fn shallowest(kept: []Pair) *Pair {
     return low;
 }
 
+// m/s, a bound on how fast any two points of the cars approach
+fn closing(a: Car, all_a: []const V3, b: Car, all_b: []const V3) f32 {
+    const v = a.state.vel - b.state.vel;
+    return @sqrt(dot(v, v)) + spinSpeed(a, all_a) + spinSpeed(b, all_b);
+}
+
+fn spinSpeed(car: Car, corners: []const V3) f32 {
+    var far: f32 = 0;
+    for (corners) |c| far = @max(far, dot(c - car.state.pos, c - car.state.pos));
+    return @sqrt(dot(car.state.angvel, car.state.angvel) * far);
+}
+
 fn place(car: Car, buf: *[max_corners]V3) []V3 {
     var n: usize = 0;
     for (car.hull.pieces) |p| for (p) |c| {
@@ -114,12 +128,13 @@ fn overlaps(x: [2]V3, y: [2]V3) bool {
     return @reduce(.And, x[0] <= y[1]) and @reduce(.And, y[0] <= x[1]);
 }
 
-// as chassis.contact with b as the track: the closest points of the cores (GJK). Cores that overlap push out
-// along the body axis on which the whole hulls overlap least: one way for all pieces, so a seam between two
-// pieces is no way out. The point: the middle of where the pieces overlap across the normal, on b's margin
-fn contact(a: []const V3, b: []const V3, hull_a: []const V3, hull_b: []const V3, axes: [6]V3, margin_b: f32, range: f32) ?chassis.Contact {
+// as chassis.contact with b as the track: the closest points of the cores (GJK), out to reach. Cores that
+// overlap push out along the body axis on which the whole hulls overlap least: one way for all pieces, so a
+// seam between two pieces is no way out. The point: the middle of where the pieces overlap across the normal,
+// on b's margin
+fn contact(a: []const V3, b: []const V3, hull_a: []const V3, hull_b: []const V3, axes: [6]V3, margin_b: f32, range: f32, reach: f32) ?chassis.Contact {
     const near = gjk.closest(b, a);
-    if (near.distance >= range) return null;
+    if (near.distance >= reach) return null;
     const normal, const depth = if (near.distance > 1e-4)
         .{ (near.b - near.a) / splat(near.distance), range - near.distance }
     else blk: {
@@ -188,9 +203,12 @@ pub fn solve(cars: []const Car, pairs: []const Pair, dt: f32) void {
         const b = cars[p.b];
         const c = p.contact;
         r.* = .at(p, a.state.*, b.state.*, c.point, c.normal);
-        r.rhs = @min(erp / dt * @max(c.depth - slop, 0), max_push);
-        r.cfm = cfm / (dt * a.body.mass * b.body.mass / (a.body.mass + b.body.mass)); // the reduced mass
-        r.hi = @min(a.hull.softness, b.hull.softness) * c.depth; // the softer car
+        if (c.depth < 0) {
+            r.rhs = c.depth / dt; // a gap: stop only the approach that closes it in the next step
+        } else {
+            r.rhs = @min(erp / dt * @max(c.depth - slop, 0), max_push);
+            r.cfm = cfm / (dt * a.body.mass * b.body.mass / (a.body.mass + b.body.mass)); // the reduced mass
+        }
         if (i == 0 or p.a != pairs[i - 1].a or p.b != pairs[i - 1].b) {
             patches[n] = .{ .from = i, .to = i };
             n += 1;
@@ -284,7 +302,7 @@ fn project(cars: []const Car, pairs: []const Pair) void {
     var deep = false;
     for (pairs, rows[0..pairs.len]) |p, *r| {
         r.* = .at(p, cars[p.a].state.*, cars[p.b].state.*, p.contact.point, p.contact.normal);
-        r.rhs = @max(p.contact.depth - project_slop, 0);
+        r.rhs = if (p.contact.depth < 0) p.contact.depth else @max(p.contact.depth - project_slop, 0); // a gap may close
         deep = deep or p.contact.depth >= project_slop;
     }
     if (!deep) return;
