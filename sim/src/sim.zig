@@ -402,6 +402,78 @@ export fn sim_get_state(s: *const Sim, out: *State) void {
     };
 }
 
+// Rollback: all that a D3 car's sim_step and sim_collide_cars change (force.State); the car, the level and the
+// materials stay. Other cars: size 0, restore false, hash 0
+pub const snapshot_size = packedSize(force.State);
+
+pub export fn sim_snapshot_size(s: *const Sim) u32 {
+    return if (s.game == .d3) snapshot_size else 0;
+}
+
+pub export fn sim_snapshot(s: *const Sim, out: [*]u8) void {
+    if (s.game != .d3) return;
+    var at = out;
+    move(&s.game.d3, &at, .save);
+}
+
+pub export fn sim_restore(s: *Sim, in: [*]const u8) bool {
+    if (s.game != .d3) return false;
+    var at = in;
+    move(&s.game.d3, &at, .load);
+    return true;
+}
+
+// over the snapshot's bytes
+pub export fn sim_hash(s: *const Sim) u64 {
+    if (s.game != .d3) return 0;
+    var bytes: [snapshot_size]u8 = undefined;
+    sim_snapshot(s, &bytes);
+    return std.hash.Wyhash.hash(0, &bytes);
+}
+
+// each scalar of x.* to or from at, in field order, little endian: no padding, no vector padding lanes
+fn move(x: anytype, at: anytype, comptime dir: enum { save, load }) void {
+    const T = @TypeOf(x.*);
+    switch (@typeInfo(T)) {
+        .@"struct" => |st| inline for (st.fields) |f| move(&@field(x.*, f.name), at, dir),
+        .array => for (x) |*e| move(e, at, dir),
+        .vector => |v| {
+            var lanes: [v.len]v.child = x.*;
+            move(&lanes, at, dir);
+            if (dir == .load) x.* = lanes;
+        },
+        .bool => {
+            var b: u8 = @intFromBool(x.*);
+            move(&b, at, dir);
+            if (dir == .load) x.* = b != 0;
+        },
+        .float, .int => {
+            const U = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const bytes = at.*[0..@sizeOf(T)];
+            switch (dir) {
+                .save => std.mem.writeInt(U, bytes, @bitCast(x.*), .little),
+                .load => x.* = @bitCast(std.mem.readInt(U, bytes, .little)),
+            }
+            at.* += @sizeOf(T);
+        },
+        else => @compileError("no snapshot of " ++ @typeName(T)),
+    }
+}
+
+fn packedSize(comptime T: type) u32 {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |st| blk: {
+            var n: u32 = 0;
+            for (st.fields) |f| n += packedSize(f.type);
+            break :blk n;
+        },
+        .array => |a| a.len * packedSize(a.child),
+        .vector => |v| v.len * packedSize(v.child),
+        .bool => 1,
+        else => @sizeOf(T),
+    };
+}
+
 // DR1: the car, then the physics world (its integration, the hull if the car has one); no step without a level
 pub export fn sim_step(s: *Sim, input: *const Input, dt: f32) void {
     switch (s.game) {
