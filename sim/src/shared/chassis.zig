@@ -178,7 +178,7 @@ fn solve(b: body.Body, hull: Hull, s: *body.State, contacts: []const Contact, dt
     }
     const count = splat(@floatFromInt(contacts.len));
     point /= count;
-    normal = vec.normalize(normal / count);
+    normal = if (vec.length(normal) > 1e-4) vec.normalize(normal / count) else .{ 0, 1, 0 }; // 0x82394d: normals that cancel
     const axis: V3 = if (@abs(normal[1]) <= 0.707) .{ 0, 1, 0 } else .{ 1, 0, 0 };
     const slide = vec.normalize(cross(axis, normal));
     const arm = point - s.pos;

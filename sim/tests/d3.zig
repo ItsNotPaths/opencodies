@@ -124,6 +124,38 @@ test "the hull pushes a sunk car out and stops its fall" {
     try expect(s.vel[0] > 0 and s.vel[0] < 2); // friction slows the slide
 }
 
+test "a car that backs hard into a thin tall box keeps a finite state" {
+    const ms = try d3.zon.parse([]d3.material.Material, gpa, data.materials);
+    defer gpa.free(ms);
+    var s: sim.Sim = .{};
+    s.world.track = try groundAndPost(ms, .{ 0, -3 });
+    defer s.world.track.?.deinit();
+    for (0..300) |_| {
+        sim.sim_step(&s, &.{ .throttle = 1, .steer = 0.3, .gear = 10 }, sim.d3_dt);
+        const b = s.game.d3.body;
+        for ([_]V3{ b.pos, b.vel, b.angvel }) |v| try expect(std.math.isFinite(@reduce(.Add, v)));
+    }
+}
+
+// made-up tarmac with a 0.6 m square post, 15 m tall, at xz: 12 triangles like a level's tree trunk
+fn groundAndPost(ms: []const d3.material.Material, xz: [2]f32) !d3.mesh.Mesh {
+    const road: u16 = @intCast(d3.material.find(ms, "TSD*".*).?);
+    const post: u16 = @intCast(d3.material.find(ms, "DEFA".*).?);
+    const lo: V3 = .{ xz[0] - 0.3, 0, xz[1] - 0.3 };
+    const hi: V3 = .{ xz[0] + 0.3, 15, xz[1] + 0.3 };
+    var c: [8]V3 = undefined;
+    for (&c, 0..) |*p, i| p.* = @select(f32, @Vector(3, bool){ i & 1 != 0, i & 2 != 0, i & 4 != 0 }, hi, lo);
+    const faces = [6][4]u8{ .{ 0, 1, 5, 4 }, .{ 2, 6, 7, 3 }, .{ 0, 4, 6, 2 }, .{ 1, 3, 7, 5 }, .{ 0, 2, 3, 1 }, .{ 4, 5, 7, 6 } }; // outward: -y, +y, -x, +x, -z, +z
+    var tris: [14]d3.mesh.Triangle = undefined;
+    for (faces, 0..) |f, i| {
+        tris[2 * i] = .fromCorners(.{ c[f[0]], c[f[1]], c[f[2]] }, post);
+        tris[2 * i + 1] = .fromCorners(.{ c[f[0]], c[f[2]], c[f[3]] }, post);
+    }
+    tris[12] = .fromCorners(.{ .{ -50, 0, -50 }, .{ -50, 0, 50 }, .{ 50, 0, -50 } }, road);
+    tris[13] = .fromCorners(.{ .{ 50, 0, -50 }, .{ -50, 0, 50 }, .{ 50, 0, 50 } }, road);
+    return d3.mesh.Mesh.init(gpa, &tris, ms);
+}
+
 const fit: d3.longitudinal.Fit = .{ .idle_rate = 110, .eta = 0.9, .drag = 0.8, .rolling = 300, .friction_torque = 30, .friction_per_rate = 0.1, .brake_torque = 4900 };
 
 test "the road model: a standing car stays, neutral loses only drag and rolling, lower gears brake more" {
